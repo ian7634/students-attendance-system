@@ -2,82 +2,56 @@ const express = require("express");
 const session = require("express-session");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
-const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Ensure data dir
-const dataDir = path.join(__dirname, "data");
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+// ---------- Simple JSON Database ----------
+const DATA_DIR = path.join(__dirname, "data");
+const DB_FILE = path.join(DATA_DIR, "db.json");
 
-const db = new Database(path.join(dataDir, "attendance.db"));
-db.pragma("journal_mode = WAL");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// ---------- Schema ----------
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    full_name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'admin',
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS students (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    reg_no TEXT UNIQUE NOT NULL,
-    course TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS classes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    course TEXT,
-    start_time TEXT NOT NULL,          -- HH:MM 24h
-    duration_minutes INTEGER DEFAULT 90,
-    grace_minutes INTEGER DEFAULT 15,
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS attendance (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER NOT NULL,
-    class_id INTEGER,
-    date TEXT NOT NULL,                -- YYYY-MM-DD
-    status TEXT NOT NULL,              -- Present | Late | Absent
-    marked_at TEXT,                    -- ISO timestamp when marked
-    FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
-    FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL,
-    UNIQUE(student_id, date, class_id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_att_date ON attendance(date);
-  CREATE INDEX IF NOT EXISTS idx_att_student ON attendance(student_id);
-`);
-
-// Seed initial admin if none exists (no public demo credentials shown in UI)
-const userCount = db.prepare("SELECT COUNT(*) as c FROM users").get().c;
-if (userCount === 0) {
-  const hash = bcrypt.hashSync("ChangeMe123!", 10);
-  db.prepare(
-    "INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)"
-  ).run("admin", hash, "Administrator", "admin");
-  console.log("Created initial admin user: admin / ChangeMe123!  (please change password in Settings)");
+function loadDB() {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    }
+  } catch (e) {
+    console.error("DB load error:", e.message);
+  }
+  return {
+    users: [],
+    students: [],
+    classes: [],
+    attendance: [],
+    nextId: { user: 1, student: 1, class: 1, attendance: 1 }
+  };
 }
 
-// Seed sample students & a default class if empty
-const studentCount = db.prepare("SELECT COUNT(*) as c FROM students").get().c;
-if (studentCount === 0) {
-  const insert = db.prepare(
-    "INSERT INTO students (name, reg_no, course) VALUES (?, ?, ?)"
-  );
+function saveDB(db) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+let db = loadDB();
+
+// Seed initial data if empty
+if (db.users.length === 0) {
+  const hash = bcrypt.hashSync("ChangeMe123!", 10);
+  db.users.push({
+    id: db.nextId.user++,
+    username: "admin",
+    password_hash: hash,
+    full_name: "Administrator",
+    role: "admin",
+    created_at: new Date().toISOString()
+  });
+  console.log("Created admin / ChangeMe123!");
+}
+
+if (db.students.length === 0) {
   const samples = [
     ["John Kamau", "DIT-001", "Diploma in IT"],
     ["Mary Wanjiku", "DIT-002", "Diploma in IT"],
@@ -86,34 +60,56 @@ if (studentCount === 0) {
     ["Kevin Mwangi", "DIT-005", "Diploma in IT"],
     ["Faith Njeri", "DIT-006", "Diploma in IT"]
   ];
-  samples.forEach(s => insert.run(...s));
+  samples.forEach(([name, reg_no, course]) => {
+    db.students.push({
+      id: db.nextId.student++,
+      name,
+      reg_no,
+      course,
+      created_at: new Date().toISOString()
+    });
+  });
 }
 
-const classCount = db.prepare("SELECT COUNT(*) as c FROM classes").get().c;
-if (classCount === 0) {
-  db.prepare(
-    `INSERT INTO classes (name, course, start_time, duration_minutes, grace_minutes)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run("Morning Lecture", "Diploma in IT", "09:00", 90, 15);
-  db.prepare(
-    `INSERT INTO classes (name, course, start_time, duration_minutes, grace_minutes)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run("Afternoon Lab", "Diploma in IT", "14:00", 120, 10);
+if (db.classes.length === 0) {
+  db.classes.push(
+    {
+      id: db.nextId.class++,
+      name: "Morning Lecture",
+      course: "Diploma in IT",
+      start_time: "09:00",
+      duration_minutes: 90,
+      grace_minutes: 15,
+      active: 1,
+      created_at: new Date().toISOString()
+    },
+    {
+      id: db.nextId.class++,
+      name: "Afternoon Lab",
+      course: "Diploma in IT",
+      start_time: "14:00",
+      duration_minutes: 120,
+      grace_minutes: 10,
+      active: 1,
+      created_at: new Date().toISOString()
+    }
+  );
 }
+
+saveDB(db);
 
 // ---------- Middleware ----------
 app.use(express.json());
 app.use(cookieParser());
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "attendance-secret-change-in-production",
+    secret: process.env.SESSION_SECRET || "attendance-secret-2026",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production"
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      sameSite: "lax"
     }
   })
 );
@@ -133,17 +129,26 @@ app.post("/api/auth/login", (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: "Username and password required" });
   }
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+
+  db = loadDB();
+  const user = db.users.find(u => u.username === username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: "Invalid credentials" });
   }
+
   req.session.userId = user.id;
   req.session.username = user.username;
   req.session.fullName = user.full_name;
   req.session.role = user.role;
+
   res.json({
     success: true,
-    user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role }
+    user: {
+      id: user.id,
+      username: user.username,
+      fullName: user.full_name,
+      role: user.role
+    }
   });
 });
 
@@ -156,9 +161,15 @@ app.post("/api/auth/logout", (req, res) => {
 
 app.get("/api/auth/me", (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: "Not authenticated" });
-  const user = db.prepare("SELECT id, username, full_name as fullName, role FROM users WHERE id = ?").get(req.session.userId);
+  db = loadDB();
+  const user = db.users.find(u => u.id === req.session.userId);
   if (!user) return res.status(401).json({ error: "Not authenticated" });
-  res.json(user);
+  res.json({
+    id: user.id,
+    username: user.username,
+    fullName: user.full_name,
+    role: user.role
+  });
 });
 
 app.post("/api/auth/change-password", requireAuth, (req, res) => {
@@ -166,34 +177,37 @@ app.post("/api/auth/change-password", requireAuth, (req, res) => {
   if (!currentPassword || !newPassword || newPassword.length < 6) {
     return res.status(400).json({ error: "Current password and new password (min 6 chars) required" });
   }
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(req.session.userId);
+
+  db = loadDB();
+  const user = db.users.find(u => u.id === req.session.userId);
   if (!user || !bcrypt.compareSync(currentPassword, user.password_hash)) {
     return res.status(401).json({ error: "Current password is incorrect" });
   }
-  const hash = bcrypt.hashSync(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, user.id);
+
+  user.password_hash = bcrypt.hashSync(newPassword, 10);
+  saveDB(db);
   res.json({ success: true, message: "Password updated successfully" });
 });
 
 // ---------- Students ----------
 app.get("/api/students", requireAuth, (req, res) => {
+  db = loadDB();
+  let list = [...db.students];
   const q = (req.query.q || "").trim().toLowerCase();
-  let rows;
   if (q) {
-    rows = db.prepare(
-      `SELECT * FROM students WHERE lower(name) LIKE ? OR lower(reg_no) LIKE ? OR lower(course) LIKE ?
-       ORDER BY name`
-    ).all(`%${q}%`, `%${q}%`, `%${q}%`);
-  } else {
-    rows = db.prepare("SELECT * FROM students ORDER BY name").all();
+    list = list.filter(s =>
+      `${s.name} ${s.reg_no} ${s.course}`.toLowerCase().includes(q)
+    );
   }
-  res.json(rows);
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  res.json(list);
 });
 
 app.get("/api/students/:id", requireAuth, (req, res) => {
-  const row = db.prepare("SELECT * FROM students WHERE id = ?").get(req.params.id);
-  if (!row) return res.status(404).json({ error: "Student not found" });
-  res.json(row);
+  db = loadDB();
+  const student = db.students.find(s => s.id === +req.params.id);
+  if (!student) return res.status(404).json({ error: "Student not found" });
+  res.json(student);
 });
 
 app.post("/api/students", requireAuth, (req, res) => {
@@ -201,18 +215,22 @@ app.post("/api/students", requireAuth, (req, res) => {
   if (!name || !reg_no || !course) {
     return res.status(400).json({ error: "name, reg_no and course are required" });
   }
-  try {
-    const info = db.prepare(
-      "INSERT INTO students (name, reg_no, course) VALUES (?, ?, ?)"
-    ).run(name.trim(), reg_no.trim(), course.trim());
-    const student = db.prepare("SELECT * FROM students WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json(student);
-  } catch (e) {
-    if (e.message.includes("UNIQUE")) {
-      return res.status(400).json({ error: "Registration number already exists" });
-    }
-    throw e;
+
+  db = loadDB();
+  if (db.students.some(s => s.reg_no === reg_no.trim())) {
+    return res.status(400).json({ error: "Registration number already exists" });
   }
+
+  const student = {
+    id: db.nextId.student++,
+    name: name.trim(),
+    reg_no: reg_no.trim(),
+    course: course.trim(),
+    created_at: new Date().toISOString()
+  };
+  db.students.push(student);
+  saveDB(db);
+  res.status(201).json(student);
 });
 
 app.put("/api/students/:id", requireAuth, (req, res) => {
@@ -220,31 +238,40 @@ app.put("/api/students/:id", requireAuth, (req, res) => {
   if (!name || !reg_no || !course) {
     return res.status(400).json({ error: "name, reg_no and course are required" });
   }
-  try {
-    const info = db.prepare(
-      "UPDATE students SET name = ?, reg_no = ?, course = ? WHERE id = ?"
-    ).run(name.trim(), reg_no.trim(), course.trim(), req.params.id);
-    if (info.changes === 0) return res.status(404).json({ error: "Student not found" });
-    const student = db.prepare("SELECT * FROM students WHERE id = ?").get(req.params.id);
-    res.json(student);
-  } catch (e) {
-    if (e.message.includes("UNIQUE")) {
-      return res.status(400).json({ error: "Registration number already exists" });
-    }
-    throw e;
+
+  db = loadDB();
+  const student = db.students.find(s => s.id === +req.params.id);
+  if (!student) return res.status(404).json({ error: "Student not found" });
+
+  if (db.students.some(s => s.reg_no === reg_no.trim() && s.id !== student.id)) {
+    return res.status(400).json({ error: "Registration number already exists" });
   }
+
+  student.name = name.trim();
+  student.reg_no = reg_no.trim();
+  student.course = course.trim();
+  saveDB(db);
+  res.json(student);
 });
 
 app.delete("/api/students/:id", requireAuth, (req, res) => {
-  const info = db.prepare("DELETE FROM students WHERE id = ?").run(req.params.id);
-  if (info.changes === 0) return res.status(404).json({ error: "Student not found" });
+  db = loadDB();
+  const idx = db.students.findIndex(s => s.id === +req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "Student not found" });
+
+  const id = db.students[idx].id;
+  db.students.splice(idx, 1);
+  db.attendance = db.attendance.filter(a => a.student_id !== id);
+  saveDB(db);
   res.json({ success: true });
 });
 
 // ---------- Classes ----------
 app.get("/api/classes", requireAuth, (req, res) => {
-  const rows = db.prepare("SELECT * FROM classes WHERE active = 1 ORDER BY start_time, name").all();
-  res.json(rows);
+  db = loadDB();
+  const list = db.classes.filter(c => c.active !== 0);
+  list.sort((a, b) => a.start_time.localeCompare(b.start_time) || a.name.localeCompare(b.name));
+  res.json(list);
 });
 
 app.post("/api/classes", requireAuth, (req, res) => {
@@ -252,21 +279,23 @@ app.post("/api/classes", requireAuth, (req, res) => {
   if (!name || !start_time) {
     return res.status(400).json({ error: "name and start_time are required" });
   }
-  // basic HH:MM validation
   if (!/^\d{2}:\d{2}$/.test(start_time)) {
     return res.status(400).json({ error: "start_time must be HH:MM" });
   }
-  const info = db.prepare(
-    `INSERT INTO classes (name, course, start_time, duration_minutes, grace_minutes)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(
-    name.trim(),
-    (course || "").trim(),
+
+  db = loadDB();
+  const cls = {
+    id: db.nextId.class++,
+    name: name.trim(),
+    course: (course || "").trim(),
     start_time,
-    duration_minutes || 90,
-    grace_minutes ?? 15
-  );
-  const cls = db.prepare("SELECT * FROM classes WHERE id = ?").get(info.lastInsertRowid);
+    duration_minutes: duration_minutes || 90,
+    grace_minutes: grace_minutes ?? 15,
+    active: 1,
+    created_at: new Date().toISOString()
+  };
+  db.classes.push(cls);
+  saveDB(db);
   res.status(201).json(cls);
 });
 
@@ -275,33 +304,35 @@ app.put("/api/classes/:id", requireAuth, (req, res) => {
   if (!name || !start_time) {
     return res.status(400).json({ error: "name and start_time are required" });
   }
-  const info = db.prepare(
-    `UPDATE classes SET name=?, course=?, start_time=?, duration_minutes=?, grace_minutes=?, active=?
-     WHERE id=?`
-  ).run(
-    name.trim(),
-    (course || "").trim(),
-    start_time,
-    duration_minutes || 90,
-    grace_minutes ?? 15,
-    active === 0 ? 0 : 1,
-    req.params.id
-  );
-  if (info.changes === 0) return res.status(404).json({ error: "Class not found" });
-  res.json(db.prepare("SELECT * FROM classes WHERE id = ?").get(req.params.id));
+
+  db = loadDB();
+  const cls = db.classes.find(c => c.id === +req.params.id);
+  if (!cls) return res.status(404).json({ error: "Class not found" });
+
+  cls.name = name.trim();
+  cls.course = (course || "").trim();
+  cls.start_time = start_time;
+  cls.duration_minutes = duration_minutes || 90;
+  cls.grace_minutes = grace_minutes ?? 15;
+  cls.active = active === 0 ? 0 : 1;
+  saveDB(db);
+  res.json(cls);
 });
 
 app.delete("/api/classes/:id", requireAuth, (req, res) => {
-  // soft delete
-  const info = db.prepare("UPDATE classes SET active = 0 WHERE id = ?").run(req.params.id);
-  if (info.changes === 0) return res.status(404).json({ error: "Class not found" });
+  db = loadDB();
+  const cls = db.classes.find(c => c.id === +req.params.id);
+  if (!cls) return res.status(404).json({ error: "Class not found" });
+  cls.active = 0;
+  saveDB(db);
   res.json({ success: true });
 });
 
-// Helper: decide status based on class start time
+// Helper for auto late
 function decideStatus(classId, requestedStatus) {
   if (!classId || requestedStatus === "Absent") return requestedStatus || "Absent";
-  const cls = db.prepare("SELECT * FROM classes WHERE id = ?").get(classId);
+  db = loadDB();
+  const cls = db.classes.find(c => c.id === classId);
   if (!cls) return requestedStatus || "Present";
 
   const now = new Date();
@@ -311,7 +342,6 @@ function decideStatus(classId, requestedStatus) {
   const graceEnd = new Date(start.getTime() + (cls.grace_minutes || 15) * 60 * 1000);
 
   if (now <= graceEnd) return "Present";
-  // still within class duration? mark Late, else keep requested
   const end = new Date(start.getTime() + (cls.duration_minutes || 90) * 60 * 1000);
   if (now <= end) return "Late";
   return requestedStatus || "Late";
@@ -319,11 +349,10 @@ function decideStatus(classId, requestedStatus) {
 
 // ---------- Attendance ----------
 app.get("/api/attendance/today", requireAuth, (req, res) => {
+  db = loadDB();
   const date = new Date().toISOString().slice(0, 10);
-  const students = db.prepare("SELECT * FROM students ORDER BY name").all();
-  const records = db.prepare(
-    "SELECT student_id, status FROM attendance WHERE date = ?"
-  ).all(date);
+  const students = [...db.students].sort((a, b) => a.name.localeCompare(b.name));
+  const records = db.attendance.filter(a => a.date === date);
 
   const map = {};
   records.forEach(r => (map[r.student_id] = r.status));
@@ -344,20 +373,14 @@ app.get("/api/attendance/today", requireAuth, (req, res) => {
 });
 
 app.get("/api/attendance", requireAuth, (req, res) => {
+  db = loadDB();
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const classId = req.query.class_id ? +req.query.class_id : null;
 
-  const students = db.prepare("SELECT * FROM students ORDER BY name").all();
-  let records;
+  const students = [...db.students].sort((a, b) => a.name.localeCompare(b.name));
+  let records = db.attendance.filter(a => a.date === date);
   if (classId) {
-    records = db.prepare(
-      "SELECT student_id, status, marked_at FROM attendance WHERE date = ? AND class_id = ?"
-    ).all(date, classId);
-  } else {
-    // fallback: any record for that date (prefer latest)
-    records = db.prepare(
-      "SELECT student_id, status, marked_at FROM attendance WHERE date = ?"
-    ).all(date);
+    records = records.filter(a => a.class_id === classId);
   }
 
   res.json({ date, class_id: classId, records, students });
@@ -369,43 +392,51 @@ app.post("/api/attendance", requireAuth, (req, res) => {
     return res.status(400).json({ error: "date and records array required" });
   }
 
+  db = loadDB();
   const nowIso = new Date().toISOString();
-  const upsert = db.prepare(`
-    INSERT INTO attendance (student_id, class_id, date, status, marked_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(student_id, date, class_id) DO UPDATE SET
-      status = excluded.status,
-      marked_at = excluded.marked_at
-  `);
 
-  const tx = db.transaction((rows) => {
-    for (const r of rows) {
-      let status = r.status || "Absent";
-      // optional auto-late based on class start time
-      if (auto_late && class_id && status !== "Absent") {
-        status = decideStatus(class_id, status);
-      }
-      upsert.run(r.student_id, class_id || null, date, status, nowIso);
+  for (const r of records) {
+    let status = r.status || "Absent";
+    if (auto_late && class_id && status !== "Absent") {
+      status = decideStatus(class_id, status);
     }
-  });
 
-  tx(records);
+    // find existing
+    const existing = db.attendance.find(
+      a => a.student_id === r.student_id && a.date === date && a.class_id == class_id
+    );
+
+    if (existing) {
+      existing.status = status;
+      existing.marked_at = nowIso;
+    } else {
+      db.attendance.push({
+        id: db.nextId.attendance++,
+        student_id: r.student_id,
+        class_id: class_id || null,
+        date,
+        status,
+        marked_at: nowIso
+      });
+    }
+  }
+
+  saveDB(db);
   res.json({ success: true, message: "Attendance saved successfully" });
 });
 
 // ---------- Reports ----------
 app.get("/api/reports", requireAuth, (req, res) => {
+  db = loadDB();
   const q = (req.query.q || "").trim().toLowerCase();
-  const students = db.prepare("SELECT * FROM students ORDER BY name").all();
-  const allAtt = db.prepare(
-    "SELECT student_id, status FROM attendance"
-  ).all();
+  const students = [...db.students];
 
   const stats = {};
   students.forEach(s => {
     stats[s.id] = { present: 0, absent: 0, late: 0 };
   });
-  allAtt.forEach(r => {
+
+  db.attendance.forEach(r => {
     if (!stats[r.student_id]) return;
     const key = r.status.toLowerCase();
     if (key === "present") stats[r.student_id].present++;
@@ -440,13 +471,16 @@ app.get("/api/reports", requireAuth, (req, res) => {
 
 // Export
 app.get("/api/export", requireAuth, (req, res) => {
-  const students = db.prepare("SELECT * FROM students").all();
-  const classes = db.prepare("SELECT * FROM classes").all();
-  const attendance = db.prepare("SELECT * FROM attendance").all();
-  res.json({ students, classes, attendance, exportedAt: new Date().toISOString() });
+  db = loadDB();
+  res.json({
+    students: db.students,
+    classes: db.classes,
+    attendance: db.attendance,
+    exportedAt: new Date().toISOString()
+  });
 });
 
-// SPA-ish fallback for html pages
+// Fallback
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
   const file = path.join(__dirname, "public", req.path === "/" ? "index.html" : req.path);
@@ -457,5 +491,7 @@ app.get("*", (req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Student Attendance System running on http://localhost:${PORT}`);
+  console.log(`Student Attendance System running on port ${PORT}`);
+  console.log("Login: admin / ChangeMe123!");
 });
+
